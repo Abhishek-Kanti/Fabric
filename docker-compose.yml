@@ -1,0 +1,20 @@
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: company-brain-backend
+    ports:
+      - "8000:8000"
+    environment:
+      - APP_NAME=Company Brain
+      - ENVIRONMENT=development
+      - DEBUG=true
+      - API_V1_PREFIX=/api/v1
+      - HOST=0.0.0.0
+      - PORT=8000
+      - LOG_LEVEL=INFO
+    env_file:
+      - path: ./backend/.env
+        required: false
+    restart: unless-stopped
