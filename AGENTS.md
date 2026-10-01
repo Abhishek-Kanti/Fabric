@@ -1,454 +1,293 @@
-# Company Brain — Agent Instructions
+# Company Brain — Agent Instructions & Operating Manual
 
 ## 1. Purpose
 
-This repository contains Company Brain, an organizational memory and intelligence platform.
+This repository contains **Company Brain**, a team-first organizational memory and intelligence platform.
 
-The system builds a temporal, provenance-aware, permission-aware organizational knowledge layer from company activity and information sources.
+The system builds a temporal, provenance-aware, permission-aware organizational knowledge layer from collaborative team activity and information sources (such as Google Workspace, Microsoft 365 / Teams, GitHub, and task management tools).
 
-The architecture is defined in:
-
-`docs/architecture/overview.md`
-
-That document is the source of truth for what we are building.
-
-This file defines how AI coding agents should work on the repository.
+This document (`AGENTS.md`) is the **repository-level operating manual** for AI coding agents and human contributors. It defines how to work in this repository, coding conventions, architectural invariants, layer boundaries, testing standards, and verification protocols.
 
 ---
 
-## 2. Source of Truth Hierarchy
+## 2. Documentation Hierarchy & Mental Model
 
-When making implementation decisions, use this order:
+Maintain a strict separation between operating rules, high-level architecture (HLD), subsystem designs (LLD), and code:
 
-1. Explicit user instruction
-2. `AGENTS.md`
-3. `docs/architecture/overview.md`
-4. Architecture decision records under `docs/decisions/`
-5. Existing code and implementation conventions
-6. Agent assumptions
+```text
+AGENTS.md
+    │
+    └── HOW YOU SHOULD WORK (Repository operating rules, conventions, invariants)
 
-Never override a higher-level decision based on an assumption.
+docs/architecture/overview.md
+    │
+    └── WHAT THE SYSTEM IS (High-Level Design / architectural source of truth)
 
-If existing code conflicts with the architecture, identify the conflict before making a major change.
+docs/architecture/*.md
+    │
+    └── HOW EACH SUBSYSTEM IS DESIGNED (Low-Level Designs: database, auth, graph, etc.)
 
----
+source code
+    │
+    └── ACTUAL IMPLEMENTATION (Clean, verified, phase-scoped code)
+```
 
-## 3. Before Every Task
+- **`AGENTS.md`**: Repository operating manual. Contains developer rules, coding standards, layer boundaries, and quality requirements. Does not contain detailed schema listings, implementation specifications, or deep subsystem designs.
+- **`docs/architecture/overview.md`**: High-Level Design (HLD). Explains what the system is, product vision, team-first concepts, major components, data flows, boundaries, and candidate technology choices. Does not contain detailed table schemas or low-level algorithms.
+- **`docs/architecture/*.md`**: Low-Level Design (LLD) documents created incrementally when designing specific subsystems (e.g., `database.md`, `authorization.md`, `knowledge-graph.md`, `retrieval.md`). Never create speculative LLDs ahead of time.
+- **Source Code**: Concrete, tested implementation matching the current development phase.
 
-Before modifying code:
-
-1. Read this file.
-2. Read the relevant architecture documentation.
-3. Inspect the existing implementation.
-4. Understand existing dependencies and interfaces.
-5. Check the current git state.
-6. Make the smallest change that correctly satisfies the task.
-
-Do not assume that a missing implementation should be invented.
-
----
-
-## 4. Architectural Principles
-
-### Evidence First
-
-Raw source evidence and normalized events are retained independently from derived organizational knowledge.
-
-The knowledge graph is derived state.
-
-Never make the graph the only copy of important organizational information.
-
-### Provenance
-
-Important knowledge must be traceable to its source evidence.
-
-Knowledge should eventually support:
-
-- source
-- timestamp
-- evidence
-- extraction method
-- confidence
-- temporal validity
-- human confirmation
-
-### Temporal Knowledge
-
-Organizational knowledge changes over time.
-
-Do not destroy historical truth merely because the current state changed.
-
-Prefer:
-
-- `valid_from`
-- `valid_to`
-- `last_observed`
-- supersession
-- correction history
-
-over destructive updates where historical context matters.
-
-### LLM Boundaries
-
-LLMs interpret and propose.
-
-Software validates and decides.
-
-The LLM must never be the source of truth for:
-
-- authorization
-- permissions
-- identity
-- graph integrity
-- provenance
-- destructive state changes
-
-Do not give an LLM unrestricted access to infrastructure.
-
-### Authorization
-
-Authorization must happen before unauthorized information reaches an LLM.
-
-Do not retrieve everything and attempt to hide unauthorized information afterward.
-
-The authorization layer must eventually support permission-aware access to:
-
-- entities
-- relationships
-- facts
-- properties
-- evidence
-- documents
-- conversations
-- source data
-
-### One Organizational Graph
-
-Company Brain should maintain one connected organizational knowledge graph.
-
-Teams and projects are permission-aware views/subgraphs of the larger organizational graph.
-
-Do not create isolated knowledge graphs per team unless explicitly required by the architecture.
-
-### Source Systems
-
-Source systems remain authoritative for fine-grained source-specific information.
-
-For example, if a user asks for an exact GitHub diff or changed code line, retrieve that information from the appropriate source system rather than relying on an LLM-generated summary.
-
-### MCP
-
-MCP must eventually use the same application, retrieval, and authorization pipeline as the main application.
-
-Never create a separate authorization path for MCP.
+Do not duplicate the same detailed specification across all levels.
 
 ---
 
-## 5. Layer Boundaries
+## 3. Source of Truth Hierarchy & Operating Rule
 
-Maintain strict separation between:
+### Hierarchy of Authority
 
-### api/
+When making implementation decisions, use this strict order:
 
-External interfaces such as REST and MCP.
+1. **Explicit user instruction**
+2. **`AGENTS.md`** (this operating manual)
+3. **`docs/architecture/overview.md`** (HLD architecture)
+4. **Architecture Decision Records** under `docs/decisions/`
+5. **Subsystem LLD documents** under `docs/architecture/*.md`
+6. **Existing code and implementation conventions**
+7. **Agent assumptions** (lowest priority; never override higher levels)
 
-Keep API handlers thin.
+### Feature Implementation Rule
 
-### schemas/
+Before writing or modifying code for any feature:
 
-Request/response DTOs and API-facing validation models.
-
-Do not use API schemas as domain models.
-
-### domain/
-
-Business concepts and domain rules.
-
-The domain layer must not depend on infrastructure implementations.
-
-### application/
-
-Use cases, workflows, orchestration, and business processes.
-
-### infrastructure/
-
-Concrete implementations:
-
-- PostgreSQL
-- Neo4j
-- vector storage
-- queues
-- object storage
-- LLM providers
-- external connectors
-- OpenFGA
-- other external services
-
-### workers/
-
-Asynchronous/background execution.
-
-### shared/
-
-Cross-cutting primitives such as:
-
-- logging
-- exceptions
-- types
-- constants
-- utilities
-
-Do not bypass these boundaries simply because doing so is faster.
+1. **Read `AGENTS.md`** to verify operating rules and constraints.
+2. **Read the relevant HLD section** in `docs/architecture/overview.md`.
+3. **Read the relevant LLD document** in `docs/architecture/` if one exists for that subsystem.
+4. **Inspect existing implementation and tests** to understand interfaces and dependencies.
+5. **Check git status** to ensure a clean baseline.
+6. **Check for conflicts**: If the proposed implementation would contradict the architecture, **stop immediately and report the conflict** rather than silently changing the architecture.
+7. **Propose architectural decisions**: If an architectural decision is required, propose it and wait for confirmation before implementing. Never invent major architectural decisions silently.
+8. **Make the smallest change** that correctly satisfies the task.
 
 ---
 
-## 6. Knowledge Architecture
+## 4. Product Terminology: Team-First Model
 
-The long-term pipeline is:
+Company Brain is explicitly **team-first rather than enterprise-first**.
 
-Data Sources
-→ Connectors
-→ Ingestion
-→ Raw Evidence / Event Store
-→ Normalized Events
-→ Knowledge Compiler
-→ Entity / Identity Resolution
-→ Ontology Validation
-→ Knowledge Graph
-→ Embeddings / Indexes / Graph Analytics
-→ Permission-Aware Retrieval
-→ LLM / Agents
-→ Answer
+### Core Product Hierarchy
 
-The Knowledge Compiler is a first-class subsystem.
+```text
+Workspace
+    │
+    ├── Users
+    ├── Teams
+    └── Projects
+           │
+           ├── Members
+           └── Tasks
+```
 
-Do not collapse ingestion, extraction, graph construction, and retrieval into one service or one large agent.
+### Terminology Invariants
 
----
+- **`Workspace`**: The top-level administrative and data-isolation boundary. A Workspace may represent:
+  - A startup
+  - A company
+  - A college team
+  - A hackathon team
+  - A research group
+  - An open-source project
+  - Any collaborative group
+- **`User`**: An individual participant in a Workspace. Do not assume every User is an "employee".
+- **`Team`**: A collaborative group of Users within a Workspace.
+- **`Project`**: A focused initiative or repository of work owned by a Workspace and associated with Users/Teams.
+- **`Task`**: An actionable unit of work within a Project.
 
-## 7. AI Architecture
-
-Do not build one giant autonomous agent.
-
-Prefer specialized workflows/agents with deterministic software around them.
-
-Potential agents include:
-
-- Knowledge Agent
-- Question Answering
-- Project Agent
-- Employee Assistance
-- Onboarding
-- Handover
-
-Use AI where semantic interpretation is required.
-
-Use deterministic code for:
-
-- validation
-- authorization
-- persistence
-- graph integrity
-- state transitions
-- policy enforcement
-- provenance
-- data normalization where deterministic rules are sufficient
+**Rule on Legacy Terms**: If an internal database table, code symbol, or configuration currently uses `organization`, do not rename it blindly. Propose the terminology/schema migration plan first and await approval before modifying existing operational code.
 
 ---
 
-## 8. Connectors
+## 5. Architectural Invariants
 
-External integrations must be replaceable.
+Every agent must respect these architectural invariants across all implementations:
 
-Connectors should conceptually support:
+### 1. Evidence First
+- Raw source evidence and normalized events are retained independently from derived organizational knowledge.
+- The knowledge graph is derived state, which can be rebuilt or re-indexed.
+- Never make the graph the sole copy of critical organizational information.
 
-- authorization
-- token refresh
-- disconnect
-- resource discovery
-- initial synchronization
-- subscriptions/webhooks
-- event normalization
+### 2. Full Provenance
+- Every entity, relation, fact, and property in the knowledge graph must trace back to source evidence.
+- Provenance attributes include: source system, external ID, ingestion timestamp, extraction method/model, confidence score, and human confirmation status.
 
-Initial integrations:
+### 3. Temporal Validity
+- Organizational knowledge changes over time; historical truth must not be erased.
+- Prefer bitemporal validity (`valid_from`, `valid_to`, `observed_at`, supersession, correction history) over destructive updates where historical context matters.
 
-- Google Workspace
-- Microsoft 365 / Teams
-- GitHub
+### 4. Deterministic LLM Boundaries
+- **LLMs interpret and propose; deterministic software validates and decides.**
+- The LLM must NEVER be the authoritative decision-maker for:
+  - Authorization and permissions
+  - Identity and entity resolution
+  - Graph integrity and foreign constraints
+  - Provenance tracking
+  - Destructive state changes or persistence
+- Do not grant an LLM unrestricted execution access to infrastructure or databases.
 
-Do not tightly couple the core domain to a specific external provider.
+### 5. Authorization Before Retrieval
+- Authorization filtering must occur **before** unauthorized information reaches an LLM prompt.
+- Never retrieve an unfiltered context window and attempt to instruct the LLM to hide unauthorized information.
 
----
+### 6. Single Connected Workspace Graph
+- Company Brain maintains one unified knowledge graph per Workspace.
+- Teams, projects, and permissions form permission-aware views/subgraphs over that unified graph.
+- Do not create isolated, physically siloed graphs per team unless explicitly dictated by architecture.
 
-## 9. Graph Analytics
+### 7. Authoritative Source Systems
+- Source systems (GitHub, Google Drive, Slack, etc.) remain authoritative for granular, source-specific payloads (e.g., exact code diffs, raw file contents).
+- Retrieve deep source data directly from the source system rather than hallucinating or approximating from summaries.
 
-Graph analytics is separate from ingestion and graph construction.
-
-Leiden/community detection, centrality, dependency paths, and community summaries belong to graph analytics.
-
-Community detection does not define authorization.
-
-Community summaries must respect permissions.
-
-Do not run expensive graph-wide analytics after every individual event unless explicitly designed to do so.
-
----
-
-## 10. Technology Principles
-
-Current technology direction:
-
-- Python
-- FastAPI
-- PostgreSQL
-- Neo4j as a graph database candidate
-- pgvector as an initial vector-search candidate
-- Queue/event infrastructure
-- OpenFGA as an authorization candidate
-- LangGraph for stateful AI workflows
-
-A technology marked as a "candidate" must not be treated as permanently locked without an explicit architectural decision.
-
-Do not introduce additional infrastructure merely because it is popular or convenient.
-
-Prefer simple infrastructure during early development.
+### 8. Model Context Protocol (MCP) Parity
+- MCP tools and endpoints must reuse the exact same application, retrieval, and authorization pipeline as the primary REST API.
+- Never implement a backdoor, bypass, or separate authorization path for MCP.
 
 ---
 
-## 11. Implementation Rules
+## 6. Layer Boundaries & Dependency Rules
 
-### Do not over-engineer
+Maintain strict physical and conceptual separation across the codebase (`backend/app/`):
 
-Build incrementally.
+```text
+api/             (External HTTP / MCP handlers; thin adapters; no business logic)
+    ↓
+schemas/         (Pydantic request/response DTOs; API validation only)
+    ↓
+application/     (Use cases, workflow orchestrators, application services)
+    ↓
+domain/          (Core business entities, domain rules, value objects; pure Python)
+    ↑
+infrastructure/  (Database, graph DB, vector index, message queue, external APIs, auth)
+workers/         (Background job consumers, scheduled tasks, asynchronous pipelines)
+shared/          (Cross-cutting utilities, exceptions, logging, config, base types)
+```
 
-Do not implement future systems merely because the final architecture contains them.
+### Dependency Rules
 
-### Do not create fake functionality
+1. **Inward Dependencies**: Dependencies must flow strictly inward toward the domain layer.
+2. **`domain/`**: Must have ZERO dependencies on outer layers (`api`, `application`, `infrastructure`, `workers`). Pure business logic and domain exceptions only.
+3. **`schemas/`**: DTOs and serialization models for API input/output. Never use API schemas as domain entities or database models.
+4. **`application/`**: Orchestrates domain models and interacts with infrastructure via abstract interfaces/ports. Must not depend on `api/`.
+5. **`infrastructure/`**: Implements interfaces defined by domain/application layers (PostgreSQL, Neo4j, pgvector, OpenFGA, Redis, external connectors).
+6. **`api/`**: Thin controllers. Parses requests, invokes application services, and maps results/exceptions to HTTP/MCP responses.
+7. **`workers/`**: Asynchronous consumers for background workflows (ingestion, compilation, embedding generation).
+8. **`shared/`**: Common primitives used across layers without circular dependencies.
 
-Do not create hardcoded or simulated implementations that pretend to perform:
-
-- knowledge extraction
-- graph reasoning
-- authorization
-- retrieval
-- AI reasoning
-- external synchronization
-
-If a subsystem is not implemented yet, establish a clean interface or clearly marked placeholder instead.
-
-### Do not silently change architecture
-
-If implementation requires changing a core architectural decision:
-
-1. Stop.
-2. Explain the conflict.
-3. Explain the proposed alternative.
-4. Wait for approval.
-
-### Preserve working code
-
-Do not rewrite functioning code simply to match personal preferences.
-
-Refactor only when required by the task or architecture.
-
-### Prefer explicitness
-
-Prefer clear interfaces and explicit dependencies over hidden magic.
+Do not bypass these layer boundaries for expediency.
 
 ---
 
-## 12. Testing
+## 7. Development & Implementation Rules
 
-Every implemented feature should have appropriate tests.
+### 1. Incremental Development
+- Build strictly phase-by-phase. The user explicitly designates the current phase (e.g., Phase 1: Foundation).
+- Do not jump ahead to future phases.
+- Do not implement future systems merely because they appear in HLD or LLD documents.
 
-Prefer:
+### 2. Scope Creep Prohibition
+- Implement the smallest complete change that satisfies the user prompt and phase requirements.
+- Do not add speculative configurations, unused dependencies, or unrequested scaffolding.
 
-- unit tests for domain logic
-- integration tests for infrastructure
-- API tests for endpoints
-- end-to-end tests for important user flows
+### 3. No Fake or Simulated Functionality
+- Do not write mock or hardcoded stubs that pretend to perform actual knowledge extraction, graph reasoning, authorization, or search.
+- If a subsystem is scheduled for a future phase, define a clean abstract interface or a clearly marked placeholder instead of fake data.
 
-Do not claim a feature is complete without running relevant tests.
+### 4. Preserve Working Code
+- Do not rewrite or restructure functioning code merely to suit personal stylistic preferences.
+- Refactor only when required by architectural needs or explicit user instructions.
 
----
-
-## 13. Security & Privacy
-
-Company Brain is not intended to be a surveillance system.
-
-Monitoring must be:
-
-- explicit
-- opt-in
-- controllable
-- work-related
-- permission-aware
-
-Do not introduce:
-
-- keystroke logging
-- indiscriminate screenshots
-- personal browsing surveillance
-- hidden monitoring
-
-Security and privacy constraints are architectural requirements, not optional UI features.
+### 5. Explicitness Over Magic
+- Prefer explicit dependency injection, clear function signatures, and transparent data structures over hidden metaprogramming or global mutable state.
 
 ---
 
-## 14. Documentation
+## 8. Coding Conventions
 
-When implementing a significant architectural component:
-
-- document important decisions
-- update relevant architecture documentation
-- create an ADR when introducing or changing a significant architectural decision
-
-Do not silently accumulate architectural decisions inside code.
-
----
-
-## 15. AGENTS.md Modification Policy
-
-Do not modify this file automatically.
-
-If you discover a recurring and confirmed:
-
-- architectural rule
-- project convention
-- important mistake
-- security constraint
-- implementation pitfall
-
-that should be remembered for future work, propose an update to this file.
-
-Only modify `AGENTS.md` after explicit approval.
-
-Avoid adding temporary task-specific instructions.
+- **Language & Runtime**: Python 3.12+, FastAPI, Pydantic v2.
+- **Type Annotations**: Comprehensive type hints on all public functions, classes, and methods. Use `from typing import ...` or Python 3.10+ built-in union syntax (`X | None`).
+- **Async First**: Use asynchronous I/O (`async def`) for database operations, HTTP requests, and external service calls.
+- **Error Handling**:
+  - Raise domain-specific exceptions in `domain/` and `application/`.
+  - Catch and translate exceptions into proper HTTP status codes in `api/` exception handlers.
+  - Never allow raw unhandled 500 tracebacks to leak sensitive internal stack details to clients.
+- **Configuration**:
+  - All configurable parameters must be declared in `app/config.py` using `pydantic-settings`.
+  - Secrets and credentials must be read from environment variables; never hardcode credentials.
+- **Linting & Formatting**: Follow standard PEP 8, formatted cleanly. Keep imports organized: standard library, third-party libraries, local application modules.
 
 ---
 
-## 16. Completion Protocol
+## 9. Testing & Verification Standards
 
-Before declaring a task complete:
+Every implemented feature must be verified before completing a task:
 
-1. Review the changes.
-2. Check that architecture boundaries remain intact.
-3. Run relevant tests.
-4. Check for accidental changes.
-5. Report important assumptions.
-6. Report any deferred work.
-7. Report any architectural concerns.
-
-Do not claim something works if it has not been verified.
+1. **Test Coverage Expectations**:
+   - **Unit Tests (`tests/unit/`)**: Verify domain logic, configuration parsing, data validation, and isolated algorithms without external infrastructure.
+   - **Integration Tests (`tests/integration/`)**: Verify API endpoints, database interactions, and service integrations with mock or containerized dependencies.
+   - **End-to-End Tests (`tests/e2e/`)**: Verify complete user and agent workflows.
+2. **Execution Requirement**:
+   - Always run the relevant test suite (e.g., `.venv\Scripts\pytest` or `uv run pytest`) before declaring a task complete.
+   - Fix all test failures and regressions introduced by changes.
+3. **No Unverified Claims**:
+   - Never report that an endpoint, feature, or service is working unless it has been executed and validated against actual tests or live verification.
 
 ---
 
-## 17. Current Development Strategy
+## 10. Security, Privacy & Compliance Guardrails
 
-Company Brain is being developed incrementally.
+Company Brain is an organizational intelligence tool, NOT an employee surveillance platform.
 
-Do not jump ahead to later phases.
+### Strict Privacy Prohibitions
+- **NO keystroke logging**
+- **NO indiscriminate screenshot capture**
+- **NO personal browsing history tracking**
+- **NO covert or hidden activity monitoring**
 
-The current implementation phase will always be explicitly specified by the user.
+### Compliance Rules
+- Ingestion of user communications and activity must be **explicit, opt-in, work-related, and permission-aware**.
+- Authorization rules must be strictly enforced at query time.
+- Provide clear boundaries for data retention, audit logging, and data deletion per Workspace.
 
-Implement the current phase thoroughly before proceeding to the next phase.
+---
+
+## 11. Important Anti-Patterns & Mistakes to Avoid
+
+1. **Collapsing Subsystems**: Never combine Ingestion, Knowledge Compiler, Graph Construction, and Retrieval into a single monolithic script or agent.
+2. **Prompt-Based Authorization**: Never rely on system prompts or LLM guardrails to enforce access control. Authorization must be computed deterministically before prompt construction.
+3. **Unbounded Autonomous Execution**: Avoid unconstrained autonomous agent loops with write access to core infrastructure. Use deterministic state machines (e.g., LangGraph) with guarded transitions.
+4. **Graph-Wide Analytics on Every Event**: Do not trigger expensive whole-graph community detection or global graph algorithms on every incoming event. Schedule analytics asynchronously.
+5. **Speculative LLD Bloat**: Do not generate empty or half-baked subsystem documents in `docs/architecture/` before their design phase officially begins.
+
+---
+
+## 12. Completion Protocol
+
+Before declaring any task complete, perform this checklist:
+
+1. [ ] **Verify Scope**: Ensure changes directly address the prompt and stay within the current phase.
+2. [ ] **Verify Layer Boundaries**: Confirm that dependencies flow inward and layers remain properly isolated.
+3. [ ] **Run Test Suite**: Run `pytest` and verify that all unit and integration tests pass cleanly.
+4. [ ] **Check Git State**: Inspect `git status` and `git diff` for accidental modifications or unwanted untracked files.
+5. [ ] **Report Assumptions & Decisions**: Clearly communicate any architectural assumptions made, ADRs needed, or deferred items.
+6. [ ] **Maintain Documentation**: If a significant architectural decision was made, update `docs/architecture/overview.md` or create an ADR in `docs/decisions/`.
+
+---
+
+## 13. AGENTS.md Modification Policy
+
+- Do not modify this file automatically without explicit user instruction.
+- Only update this file to record recurring, confirmed:
+  - Repository operating rules
+  - Critical architectural constraints
+  - Coding conventions
+  - Security guardrails
+  - Verified pitfalls and anti-patterns
+- Do not add temporary, task-specific instructions to this file.

@@ -1,5 +1,12 @@
-from typing import Generator
+from collections.abc import AsyncGenerator, Generator
 import pytest
+import pytest_asyncio
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    create_async_engine,
+)
+from sqlalchemy.pool import NullPool
 from starlette.testclient import TestClient
 
 from app.config import Settings, get_settings
@@ -24,3 +31,35 @@ def client(test_settings: Settings) -> Generator[TestClient, None, None]:
     app.dependency_overrides[get_settings] = lambda: test_settings
     with TestClient(app) as test_client:
         yield test_client
+
+
+@pytest_asyncio.fixture(scope="session")
+async def db_engine() -> AsyncGenerator[AsyncEngine, None]:
+    """Fixture providing an async SQLAlchemy engine connected to PostgreSQL test database."""
+    settings = get_settings()
+    engine = create_async_engine(
+        settings.async_test_database_url,
+        echo=False,
+        poolclass=NullPool,
+    )
+    yield engine
+    await engine.dispose()
+
+
+@pytest_asyncio.fixture
+async def db_session(db_engine: AsyncEngine) -> AsyncGenerator[AsyncSession, None]:
+    """Fixture providing an isolated AsyncSession wrapped in a rolled-back transaction."""
+    async with db_engine.connect() as connection:
+        transaction = await connection.begin()
+        session = AsyncSession(
+            bind=connection,
+            expire_on_commit=False,
+            autocommit=False,
+            autoflush=False,
+        )
+        try:
+            yield session
+        finally:
+            await session.close()
+            if connection.in_transaction():
+                await transaction.rollback()

@@ -14,7 +14,32 @@ services:
       - HOST=0.0.0.0
       - PORT=8000
       - LOG_LEVEL=INFO
+      - DATABASE_URL=postgresql+asyncpg://company_brain:company_brain_secret@postgres:5432/company_brain
     env_file:
       - path: ./backend/.env
         required: false
+    depends_on:
+      postgres:
+        condition: service_healthy
     restart: unless-stopped
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: company-brain-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: company_brain
+      POSTGRES_PASSWORD: company_brain_secret
+      POSTGRES_DB: company_brain
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U company_brain -d company_brain"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
