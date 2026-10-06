@@ -332,11 +332,12 @@ docs/
 └── architecture/
     ├── overview.md              ◄ This document (HLD Source of Truth)
     ├── database.md              ◄ Detailed relational tables, columns, indexes, migrations
-    ├── authorization.md         ◄ ReBAC/RBAC schemas, permission tuples, enforcement logic
-    ├── knowledge-graph.md       ◄ Entity types, relationship schemas, ontology, Cypher specs
+    ├── identity.md              ◄ Sovereign identity, external identity mapping, OAuth context
+    ├── authorization.md         ◄ ReBAC/RBAC schemas, permission tuples, pre-retrieval filtering
+    ├── connectors-ingestion.md  ◄ Connector specs (GitHub, Google, M365, Slack), webhooks, raw evidence
     ├── knowledge-compiler.md    ◄ Extraction prompts, resolution algorithms, compilation stages
+    ├── knowledge-graph.md       ◄ Entity types, relationship schemas, ontology, Cypher specs
     ├── retrieval.md             ◄ Hybrid search, ranking, temporal fusion, context builder
-    ├── integrations.md          ◄ Connector specs (GitHub, Google, M365), webhook protocols
     ├── agents.md                ◄ Specialized agent state graphs, tools, prompts
     └── mcp.md                   ◄ MCP tool schemas, transport protocols, client integrations
 ```
