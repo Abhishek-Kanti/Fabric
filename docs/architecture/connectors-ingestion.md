@@ -286,9 +286,9 @@ connector_resources
 ├── resource_type (VARCHAR(50): 'repository', 'channel', 'folder', 'shared_drive')
 ├── display_name (VARCHAR(255), Human-readable name, e.g. "acme/slam-engine", "#robotics-dev")
 ├── sync_scope (VARCHAR(50): 'all', 'prs_only', 'discussions_only', 'read_only')
-├── mapped_project_id (UUIDv7, Nullable FK -> projects.id ON DELETE SET NULL)
+├── mapped_project_id (UUIDv7, Nullable FK -> projects.id ON DELETE SET NULL (mapped_project_id))
 ├── default_visibility (VARCHAR(30): 'project_scoped', 'workspace_global', 'internal_only')
-├── sync_status (VARCHAR(30): 'active', 'paused', 'error')
+├── sync_status (VARCHAR(30): 'active', 'paused', 'error', 'disconnected')
 ├── sync_cursor (JSONB, High-water marks, change tokens, deltaLinks for this specific resource)
 ├── last_synced_at (TIMESTAMPTZ, Last successful sync timestamp)
 ├── created_at (TIMESTAMPTZ)
@@ -298,7 +298,7 @@ connector_resources
 
 #### Relational Constraints:
 - `FOREIGN KEY (workspace_id, connection_id) REFERENCES connector_connections(workspace_id, id) ON DELETE RESTRICT`
-- `FOREIGN KEY (workspace_id, mapped_project_id) REFERENCES projects(workspace_id, id) ON DELETE SET NULL`
+- `FOREIGN KEY (workspace_id, mapped_project_id) REFERENCES projects(workspace_id, id) ON DELETE SET NULL (mapped_project_id)`
 - `UNIQUE (workspace_id, connection_id, provider_resource_id) WHERE deleted_at IS NULL`
 - `INDEX idx_connector_resources_lookup ON connector_resources(workspace_id, connection_id, resource_type)`
 - `INDEX idx_connector_resources_project ON connector_resources(workspace_id, mapped_project_id) WHERE deleted_at IS NULL`
@@ -313,6 +313,13 @@ connector_resources
      - If `default_visibility = 'workspace_global'`, non-guest workspace members can read it.
      - If `default_visibility = 'internal_only'` or `project_scoped`, it defaults strictly to **DENY** for all non-admin users until explicitly mapped.
      - In adherence to [`authorization.md` Section 3.2](file:///F:/Projects/Fabric/docs/architecture/authorization.md), `mapped_project_id IS NULL` alone **NEVER** grants access.
+3. **Workspace Tenancy Integrity & Composite Foreign Key Nulling**:
+   - The composite foreign key `(workspace_id, mapped_project_id) REFERENCES projects(workspace_id, id)` enforces multi-tenant boundary integrity: a connector resource in Workspace A can never be mapped to a project in Workspace B.
+   - When a project is deleted, the cascade behavior must **never nullify `workspace_id`**, which is an immutable, non-null tenant boundary (`NOT NULL`).
+   - In PostgreSQL 15+ (Company Brain targets PostgreSQL 16), this is enforced using column-targeted syntax:
+     `FOREIGN KEY (workspace_id, mapped_project_id) REFERENCES projects(workspace_id, id) ON DELETE SET NULL (mapped_project_id)`
+   - This explicitly targets only `mapped_project_id` to be set to `NULL` upon project deletion, preserving `workspace_id` completely intact and preventing orphaned or tenant-less resource records.
+   - Once unmapped, the resource immediately reverts to its default visibility posture (`default_visibility = 'internal_only'` $\rightarrow$ default-deny; or explicit `workspace_global`). Moreover, because projects are soft-deleted (`projects.deleted_at IS NOT NULL`), `AccessibleScope` CTE immediately drops the project ID from all users' scopes, guaranteeing immediate retrieval revocation even prior to physical project deletion.
 
 ### 4.5 Non-Authoritative Status of `project_hint`
 
@@ -322,6 +329,141 @@ Inbound messages, git commit text, or pull request descriptions may contain proj
 - Authoritative mapping derives strictly from an explicit administrative assignment in `connector_resources.mapped_project_id`.
 
 ---
+
+### 4.6 Workspace, Team, Project, and Repository Cardinality & Knowledge Compilation
+
+#### 4.6.1 Cardinality Principles
+To accurately model modern engineering organizations without compromising security boundaries, Company Brain defines the following cardinality invariants:
+
+1. **Workspace Hierarchy**:
+   - One `Workspace` can contain multiple `Teams` and multiple `Projects`.
+   - `Teams` and `Projects` are independent organizational units within the Workspace.
+2. **Team-to-Repository Relationship ($1:N$)**:
+   - One `Team` can maintain and contribute to multiple repositories (e.g. the Core Infrastructure Team maintains five distinct microservice and tooling repositories).
+3. **Project-to-Repository Relationship ($1:N$)**:
+   - **One `Project` can be associated with multiple repositories.**
+   - In modern software development, a single project frequently encompasses several decoupled repositories—such as a `frontend` repository, a `backend` repository, and an `infrastructure` repository.
+   - All repositories mapped to that project contribute their evidence, commits, diffs, pull requests, and issues to that project's unified organizational memory.
+   - **Critical Clarification**: The V1 decision does **NOT** require one repository per project. Multiple repositories can and should contribute knowledge to the exact same project ($N:1$ Repositories-to-Project).
+4. **Repository-to-Project Mapping Invariant ($N:1$)**:
+   - **A repository must map to at most one Company Brain Project in V1**, or to an explicitly approved workspace-global scope.
+   - **A repository must NOT be mapped to multiple projects in V1.**
+   - **Folder-level mapping within a monorepo is deferred to Phase 3.**
+
+```mermaid
+erDiagram
+    WORKSPACE ||--o{ TEAM : contains
+    WORKSPACE ||--o{ PROJECT : contains
+    TEAM ||--o{ REPOSITORY : maintains
+    PROJECT ||--o{ REPOSITORY : "associated with (1:N)"
+    REPOSITORY }o--|| PROJECT : "maps to in V1 (N:1)"
+```
+
+#### 4.6.2 Knowledge Ingestion & Cross-Repository Compilation
+Mapping repositories to projects does not physically isolate the ingestion pipeline or prevent holistic organizational intelligence:
+
+1. **Standard Ingestion Flow Across All Mapped Repositories**:
+   - Events from all valid, mapped repositories flow through the standard deterministic pipeline:
+     $$\text{Repository Events} \longrightarrow \text{Durable Ingestion} \longrightarrow \text{Normalization} \longrightarrow \text{Knowledge Compiler} \longrightarrow \text{Knowledge Graph \& Indexes}$$
+2. **Cross-Repository Knowledge Synthesis**:
+   - The Knowledge Compiler processes events across all mapped repositories within the workspace.
+   - When evidence supports it, the Knowledge Compiler establishes cross-repository entities and relationships.
+     - *Example*: A pull request in `slam-frontend` referencing an API endpoint defined in `slam-backend`.
+     - *Example*: A Terraform deployment module in `slam-infra` referencing container images generated from `slam-backend`.
+   - Repository mapping does **not** prevent the Knowledge Compiler from synthesizing connections across repositories within the same workspace.
+3. **Granular Multi-Evidence Provenance Retention**:
+   - Every derived fact, entity, relationship, and synthesized attribute must explicitly retain complete provenance identifying **all** source evidence required to support and substantiate it:
+     - `supporting_evidence_ids` (array of UUIDv7 foreign keys referencing `raw_evidence.id`).
+     - Originating `connector_resource_id` records (identifying each source repository/container) and their configured authorization scopes (`mapped_project_id`, `default_visibility`).
+     - Source platform identifiers (`commit_sha`, `pr_number`, `external_url`).
+   - If a derived fact or relationship is established by synthesizing evidence across multiple repositories, connectors, or authorization scopes, the graph node/edge persists pointers to *every single supporting evidence record*. Floating, ungrounded, or unattributed derived knowledge is strictly prohibited by [`AGENTS.md` Invariants 1 & 2](file:///F:/Projects/Fabric/AGENTS.md).
+
+#### 4.6.3 Authorization Boundaries & Pre-Retrieval Safety
+The concern behind deferring monorepo folder-level mapping is **authorization and access safety, not ingestion capability**.
+
+1. **Inherited Repository Scope**:
+   - In V1, all evidence, commits, diffs, issues, and derived graph nodes from a repository inherit that repository's configured project or approved workspace-global scope.
+   - If a repository contains components with different access requirements (e.g. open UI libraries alongside proprietary trading algorithms), V1 **cannot safely split** that repository into folder-specific authorization scopes.
+2. **Explicit Administrative Decision for Workspace-Global Scope**:
+   - Mapping a repository to `default_visibility = 'workspace_global'` (accessible to all non-guest workspace members) requires an **explicit, privileged administrative decision**.
+   - Workspace-global mapping must **never** be an automatic fallback for unmapped or ambiguously scoped repositories.
+3. **Non-Authoritative Scoping Hints**:
+   - Inferred ownership, commit message mentions, or extracted `project_hint` values must **never** grant access or override an approved repository mapping.
+4. **Pre-Retrieval Enforcement**:
+   - Authorization filtering must occur **before** evidence or graph nodes enter retrieval ranking or the LLM context.
+5. **No Cross-Project Authorization Bypass via Graph Traversal**:
+   - Cross-project relationships must **never** become an attack vector or backdoor to bypass authorization.
+   - When the Knowledge Compiler links Node A (Project 1) and Node B (Project 2), a user authorized only on Project 1 who queries Node A must **not** be allowed to traverse through or view Node B unless the user also possesses explicit authorization for Project 2.
+   - In accordance with [`authorization.md` Section 6.5 (Option A)](file:///F:/Projects/Fabric/docs/architecture/authorization.md):
+     - Every node on the path must be authorized (`ALL(n IN nodes(path) WHERE ...)`).
+     - Both endpoint nodes of every traversed relationship must be authorized.
+6. **Material Evidence Authorization for All Derived Content**:
+   - Before returning any derived fact, relationship, synthesized attribute, summary, or answer, the retrieval layer must enforce authorization on the evidence that **materially supports** the returned content—not merely on the graph node, relationship, or citation displayed to the user.
+   - **Rejection of Citation & Endpoint Redaction as Security Controls**: The system must **never assume** that hiding citations, filtering graph endpoints, or authorizing only the final answer's destination node is sufficient to prevent information leakage. If a derived fact, relationship, or summary itself reveals information originating from an unauthorized source, omitting the citation or hiding the destination node still leaks confidential organizational knowledge in the text or graph structure.
+7. **Multi-Scope Evidence: All-or-Nothing Rule vs. Safe Independent Derivation**:
+   - If a derived fact requires evidence from multiple authorization scopes (e.g. Scope A and Scope B):
+     - **All-or-Nothing Rule (Default)**: The fact must **not** be disclosed to a user who lacks access to *any* evidence required to support that fact. A user lacking access to Scope B cannot receive a fact substantiated jointly by Scope A and Scope B; the fact is omitted from graph retrieval, search ranking, and LLM context.
+     - **Safe Independent Derivation Exception**: The system may derive and disclose a separate result using *only* evidence the user is authorized to access, **provided that**:
+       1. That separate result remains valid, accurate, and substantiated on its own merits without relying on the excluded Scope B evidence; AND
+       2. That separate result does not reveal information, architectural secrets, or inferences derived from the excluded Scope B evidence.
+     - If a safe independent derivation cannot be substantiated solely by authorized evidence, the fact must be completely omitted.
+
+#### 4.6.4 Architectural Scoping Examples
+
+The following examples illustrate these cardinality, compilation, and authorization rules across common organizational topologies:
+
+```text
+┌────────────────────────────────────────────────────────────────────────────────────────┐
+│ EXAMPLE 1: HACKATHON TEAM                                                             │
+│ - Structure: 1 Workspace ("CalHacks Team"), 1 Project ("Autonomous Rover"),           │
+│   1 Repository ("rover-all-in-one").                                                   │
+│ - Mapping: Repository "rover-all-in-one" maps to Project "Autonomous Rover".           │
+│ - Cardinality: 1:1 project-to-repo mapping.                                            │
+│ - Access: All workspace members belong to the project and access all repo evidence.    │
+├────────────────────────────────────────────────────────────────────────────────────────┤
+│ EXAMPLE 2: COMPANY PRODUCT (MULTI-REPOSITORY PROJECT)                                  │
+│ - Structure: 1 Workspace ("Acme Corp"), 1 Project ("SLAM Navigation System"),          │
+│   3 Repositories ("slam-frontend", "slam-backend", "slam-infrastructure").             │
+│ - Mapping: All 3 repositories map to Project "SLAM Navigation System".                 │
+│ - Cardinality: N:1 repos-to-project (multiple repositories contributing to 1 project). │
+│ - Compilation: Knowledge Compiler establishes cross-repo links between UI calls in     │
+│   "slam-frontend" and API endpoints in "slam-backend".                                 │
+│ - Access: Any engineer authorized on Project "SLAM Navigation System" retrieves        │
+│   coherent, unified knowledge across all three repositories.                           │
+├────────────────────────────────────────────────────────────────────────────────────────┤
+│ EXAMPLE 3: COMPANY WITH SEPARATE ACCESS BOUNDARIES (INDEPENDENT PROJECTS)              │
+│ - Structure: 1 Workspace ("FinTech Corp"), 2 Teams ("Ledger Team", "Mobile Team"),    │
+│   2 Projects ("Core Payments & Ledger", "Customer Mobile App"),                        │
+│   2 Repositories ("payments-ledger-core", "mobile-app-client").                        │
+│ - Mapping: "payments-ledger-core" maps to Project "Core Payments & Ledger" (private).  │
+│            "mobile-app-client" maps to Project "Customer Mobile App".                  │
+│ - Cardinality: Disjoint N:1 mappings with isolated authorization scopes.               │
+│ - Access: Mobile engineers authorized only on "Customer Mobile App" cannot query,     │
+│   search, or traverse into "payments-ledger-core" evidence, code, or graph facts.      │
+│   If a cross-repo fact requires evidence from both repos (e.g. a mobile PR calling an  │
+│   unreleased payment settlement API), the fact is OMITTED for mobile engineers. Hiding │
+│   citations while revealing the derived fact is strictly prohibited.                   │
+├────────────────────────────────────────────────────────────────────────────────────────┤
+│ EXAMPLE 4: MONOREPO WITH MIXED ACCESS NEEDS (V1 MAPPING & PHASE 3 DEFERRAL)           │
+│ - Structure: 1 Workspace ("Global Tech"), 1 Repository ("enterprise-monorepo")         │
+│   containing:                                                                          │
+│     - /services/trading-algo  (strictly confidential algorithmic trading core)         │
+│     - /apps/client-portal     (general customer interface)                             │
+│     - /libs/common-utils      (shared library)                                         │
+│ - V1 Rule: The ENTIRE repository must map to ONE scope (e.g. Project "Trading Core"    │
+│   with restricted confidential access, or remain unmapped/internal-only).              │
+│ - Why Defer Folder-Level Mapping to Phase 3?                                           │
+│   - Ingestion is fully capable of parsing subfolders, but AUTHORIZATION requires:      │
+│     1. Splitting atomic commits that touch both confidential and general folders.      │
+│     2. Establishing folder-specific ReBAC project boundaries.                          │
+│     3. Verifying that shared libraries do not leak confidential context.               │
+│   - In V1, we preserve strict security: an entire repository is the atomic             │
+│     authorization unit. Folder-level sub-mapping is deferred to Phase 3.               │
+└────────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
 
 ## 5. Retrieval Authorization, Graph Safety & Lifecycle Propagation
 
@@ -336,7 +478,7 @@ When a user or agent issues a query:
 3. The resulting scope is injected into the vector search and graph retrieval operations:
 
 ```sql
--- Vector retrieval pre-filtering enforcing connector resource mapping
+-- Vector retrieval pre-filtering enforcing connector resource mapping and retention lifecycle
 SELECT vc.id, vc.content, vc.embedding <=> :query_vector AS distance
 FROM vector_chunks vc
 JOIN raw_evidence re ON re.id = vc.evidence_id AND re.workspace_id = vc.workspace_id
@@ -344,7 +486,11 @@ JOIN connector_resources cr ON cr.id = re.connector_resource_id AND cr.workspace
 WHERE vc.workspace_id = :workspace_id
   AND vc.deleted_at IS NULL
   AND re.deleted_at IS NULL
-  AND cr.deleted_at IS NULL
+  -- Note: cr.deleted_at IS NOT checked here because under Mode A (Historical Retention),
+  -- cr.deleted_at stops active ingestion while historical evidence (re, vc) remains 
+  -- preserved and queryable under cr's authoritative project ReBAC mapping.
+  -- In Mode B (Purge) or explicit erasure, ErasureOrchestrator marks re.deleted_at
+  -- and purges vc, immediately blocking retrieval across all stores.
   AND (
       -- 1. Project-scoped resource: must belong to user's accessible projects
       (cr.mapped_project_id IS NOT NULL AND cr.mapped_project_id = ANY(:accessible_project_ids))
@@ -356,7 +502,7 @@ ORDER BY distance ASC
 LIMIT :top_k;
 ```
 
-### 5.2 Knowledge Graph Traversal Safety (Option A Adopted)
+### 5.2 Knowledge Graph Traversal Safety (Option A with Material Evidence Authorization)
 
 When traversing the Knowledge Graph derived from connector evidence:
 - **Path Node Authorization**: Every intermediate node and target node must belong to the user's accessible scope.
@@ -365,12 +511,35 @@ When traversing the Knowledge Graph derived from connector evidence:
   1. `rel.workspace_id == $workspace_id`,
   2. Both endpoint nodes are authorized for the user, and
   3. `type(rel) IN $allowed_relationship_types`.
+- **Material Evidence Authorization on Traversed Relationships**: In addition to endpoint authorization, any relationship or derived fact property returned or traversed must have all its supporting evidence within the user's authorized scope. If a relationship materially relies on evidence from an unauthorized project, that relationship is untraversable and invisible to the user.
 
-### 5.3 Source Evidence & Citations Access
+### 5.3 Material Evidence Authorization, Provenance Verification & Prohibition of Citation Stripping
 
-When an LLM generates an answer citing source evidence:
-- Citations return `external_url` and short snippets only if the underlying `evidence_id` belongs to a `connector_resource` the user is authorized to read.
-- If a user lacks permission to the source project, the citation is stripped before the response leaves the service layer, preventing information leakage via citations.
+#### 5.3.1 The Fundamental Flaw of Citation Stripping & Endpoint-Only Filtering
+A dangerous architectural anti-pattern in knowledge-graph and RAG systems is attempting to enforce access control by **stripping citations after generation**, **authorizing only the final answer's destination node**, or **filtering only relationship endpoints**:
+- **Why Citation Stripping Fails**: Suppose Fact $F$ ("API endpoint `/v1/settle` requires HMAC-SHA256 signatures validated against AWS KMS key `arn:aws:kms:...payments-prod`") is derived by synthesizing evidence from public repository `mobile-app-client` and restricted repository `payments-ledger-core`. If Fact $F$ is fed into an LLM context for a user authorized only on `mobile-app-client`, the LLM will generate an answer explaining the KMS signature requirement. Stripping the citation URL or repository name before returning the response does **not** protect the system: the confidential cryptographic requirement from `payments-ledger-core` has already leaked in the synthesized answer text!
+- **Why Endpoint-Only Filtering Fails**: Filtering only the destination node or relationship endpoints in a graph traversal is insufficient if a relationship connects two authorized nodes (e.g. `User(Alice) -> CONTRIBUTED_TO -> Service(AuthService)`) but the fact itself was extracted from a confidential commit in an unauthorized repository.
+- **The Core Invariant**: Do **not** assume that hiding citations, filtering graph endpoints, or authorizing only the final answer's destination node is sufficient to prevent information leakage. If the returned content reveals information derived from an unauthorized source, the disclosure itself is an authorization violation.
+
+#### 5.3.2 The Material Evidence Authorization Rule
+To prevent cross-scope information leakage deterministically:
+1. **Material Evidence Pre-Retrieval Enforcement**:
+   Before returning a derived fact, relationship, property, summary, or answer, the retrieval layer must enforce authorization on the evidence that **materially supports** the returned content—not merely on the graph node, relationship, or citation displayed to the user:
+   $$\forall e \in \text{supporting\_evidence}(F): \quad \text{is\_authorized}(\text{caller}, e) = \text{TRUE}$$
+   where an evidence record $e$ is authorized if and only if:
+   $$(e.\text{mapped\_project\_id} \in \text{caller.accessible\_project\_ids}) \;\lor\; (e.\text{default\_visibility} = \text{'workspace\_global'} \;\land\; \text{caller.is\_not\_guest})$$
+2. **Deterministic Pre-Prompt Enforcement**:
+   Evidence and derived facts lacking full caller authorization are filtered out **deterministically in database and graph queries** before retrieval ranking and prompt construction. Unauthorized information must never reach an LLM prompt.
+3. **Citations as Verifiable Provenance, Not Security Gates**:
+   Citations reflect the provenanced `external_url`, `commit_sha`, and title of authorized source evidence. Citations are displayed because the user is *already authorized* to read the underlying evidence; citation stripping is never treated as a substitute for pre-retrieval access control.
+
+#### 5.3.3 Multi-Scope Evidence: All-or-Nothing vs. Safe Independent Derivation
+When knowledge compilation synthesizes facts across multiple repositories or authorization scopes:
+- **Default All-or-Nothing Omission**: If a fact requires evidence from multiple authorization scopes (e.g. Scope A and Scope B), it must **not** be disclosed to a user who lacks access to *any* evidence required to support that fact. If a user has access to Scope A but not Scope B, the fact is completely omitted from graph traversal, vector search results, and LLM context.
+- **Safe Independent Derivation Exception**: The system may derive and return a separate, narrower result using *only* evidence the user is authorized to access, **provided that**:
+  1. The separate result remains factually valid and substantiated solely by the authorized Scope A evidence; AND
+  2. The separate result reveals zero information, architectural hints, or inferences derived from the excluded Scope B evidence.
+- If a safe independent derivation cannot be substantiated solely by authorized evidence without leaking excluded information, the fact must be completely omitted.
 
 ### 5.4 Full MCP & Agent Parity
 
@@ -389,10 +558,49 @@ To guarantee consistent authorization across all states, retrieval behavior is s
 | **Unmapped** (`mapped_project_id IS NULL`, `default_visibility = 'internal_only'`) | Ingestion active; evidence saved to Tier 2 storage | **DENY** (Hidden from search, vector, graph, MCP, agents) | Default-deny posture. Only Workspace Admins can view resource in connector settings. |
 | **Workspace Global** (`mapped_project_id IS NULL`, `default_visibility = 'workspace_global'`) | Ingestion active | **ALLOW** for non-guest workspace members; **DENY** for guests | Explicitly classified workspace knowledge. |
 | **Paused** (`sync_status = 'paused'`) | Ingestion and polling halted | **ALLOW** for authorized project members | Historical evidence remains valid organizational memory. |
-| **Disconnected / Soft-Deleted** (`cr.deleted_at IS NOT NULL`) | Ingestion halted | **Mode A (Default)**: Evidence preserved under Project ReBAC.<br/>**Mode B (Purge)**: Triggers erasure across all stores. | Admin selects whether to retain historical project memory or purge completely. |
+| **Disconnected / Soft-Deleted with Historical Retention (Mode A, Default)** (`cr.deleted_at IS NOT NULL`, `re.deleted_at IS NULL`) | Ingestion halted (webhooks dropped, polling stopped) | **ALLOW for authorized project members** under existing Project ReBAC scope (`cr.mapped_project_id`); **DENY** for users outside project scope and guests (unless workspace-global). | Retaining historical organizational memory is the default. Disconnecting stops new ingestion; historical evidence and derived artifacts remain preserved and queryable under sovereign project authorization. |
+| **Disconnected / Soft-Deleted with Purge (Mode B)** (`cr.deleted_at IS NOT NULL`, `re.deleted_at IS NOT NULL`) | Ingestion halted | **IMMEDIATE DENY across all retrieval paths** (search, vector, graph, summaries, MCP, agents). | Triggers `ErasureOrchestrator` across all 9 stores (`re.deleted_at = NOW()`, `vector_chunks` purged, graph nodes pruned). Zero queryable records remain. |
 | **Revoked Connection** (`status = 'revoked'`) | Ingestion and webhooks halted | **ALLOW** for authorized project members | Historical evidence is preserved unless explicitly purged. |
 | **Mapped to Deleted Project** (`projects.deleted_at IS NOT NULL`) | Ingestion halted or unmapped | **IMMEDIATE DENY** across all retrieval paths | `AccessibleScope` CTE requires `p.deleted_at IS NULL`; project ID drops from allowed scope instantly. |
 | **Mapped to Archived Project** (`projects.status = 'archived'`) | Ingestion paused or read-only | **READ-ONLY ALLOW** for project members | Historical context remains readable; mutations to project/tasks are rejected. |
+
+---
+
+### 5.6 Provenance and Authorization for Derived Summaries & Materialized Knowledge (Prerequisite Specification)
+
+Materialized knowledge encompasses pre-computed, stored artifacts such as periodic project digests, automated architectural summaries, roll-up status reports, and entity overview notes generated asynchronously by LLM workers (Knowledge Compiler).
+
+Because materialized knowledge synthesizes and compresses raw evidence into narrative text or structured properties, it presents a unique authorization challenge when evidence spans multiple repositories or projects.
+
+#### 5.6.1 Single-Scope Materialized Summaries (Supported in V1)
+A materialized summary derived exclusively from evidence within a **single authorization scope** inherits that scope cleanly:
+1. **Project-Scoped Summary**: If a summary $S$ is generated from evidence $E \subseteq \text{Project } P$, $S$ is assigned `mapped_project_id = P`. It is retrievable only by users authorized on Project $P$.
+2. **Workspace-Global Summary**: If a summary $S$ is generated exclusively from repositories/resources classified as `default_visibility = 'workspace_global'`, $S$ is assigned `default_visibility = 'workspace_global'`. Non-guest workspace members can retrieve it.
+3. **Full Provenance Linkage**: The summary record in PostgreSQL maintains an explicit foreign key array:
+   $$\text{supporting\_evidence\_ids} = [e_1, e_2, \dots, e_k]$$
+   If any underlying evidence item $e_i$ is soft-deleted, modified, or re-scoped, the summary is invalidated and re-queued for re-compilation.
+
+#### 5.6.2 The Cross-Scope Materialization Trap
+When a summary attempts to synthesize information across **multiple authorization scopes** (e.g. summarizing joint progress across Project 1 and Project 2):
+- **Why Post-Hoc Filtering/Redaction Fails**: Natural language generated by an LLM is tightly coupled and non-linear. Even if an automated filter redacts explicit sentences mentioning Project 2, the remaining text often leaks unprivileged context (e.g. "Delays occurred because the backend team had to rewrite authentication headers for the private payments bridge"). An LLM cannot be relied upon to redact its own prior outputs deterministically.
+- **The Information Leakage Risk**: Serving a pre-computed multi-scope summary to a user who only has access to Project 1 will inevitably leak Project 2 information unless the summary is entirely re-synthesized.
+
+#### 5.6.3 Allowed Dynamic Alternative in V1: Query-Time Synthesis
+In V1, cross-scope intelligence is **not** delivered via pre-computed cross-scope materialized summaries. Instead:
+- If a user asks a cross-project question ("How do our mobile client and backend ledger interact?"):
+- The system executes **pre-retrieval authorization filtering first**, selecting only the evidence and single-scope facts that the specific querying user is authorized to read (`scope(user)`).
+- The LLM synthesizes the cross-repository answer dynamically at query time using exclusively that pre-filtered, authorized context.
+- Zero unauthorized evidence enters the prompt; zero post-hoc redaction is required.
+
+#### 5.6.4 Formal Prerequisite: Cross-Scope Materialized Knowledge Architecture
+The current architecture **does not yet specify a provably safe, deterministic implementation for pre-computed, cross-scope materialized summaries**.
+
+Therefore, this issue is **not considered solved** for offline materialized state. Before Company Brain implements cross-scope materialized knowledge synthesis (scheduled for Phase 3), the following architecture must be designed, documented in an LLD, and formally approved:
+1. **Decomposable Multi-View Materialization**: A mechanism to store materialized summaries as decomposed, independently authorized claim fragments (e.g. atomic semantic triples or attributed sentence blocks with single-scope provenance tags), OR
+2. **Scope-Partitioned Multi-View Compilation**: Pre-computing distinct materialized views per authorization profile/project boundary, ensuring no single stored document contains multi-scope synthesis, OR
+3. **Provable Semantic Attribution**: A formal verification pipeline that mathematically proves an authorized sub-summary can be derived without information leakage from excluded scopes.
+
+Until such a design is completed and approved, **all materialized summaries and pre-computed graph entity digests must be strictly single-scope**. Cross-scope knowledge synthesis remains exclusively query-time and dynamically scoped to the caller's pre-filtered permissions.
 
 ---
 
@@ -959,12 +1167,13 @@ The following architectural decisions are formally established and binding:
 | **AD-INGEST-09** | **Transactional Outbox / Worker Queue Decoupling** | Raw evidence, normalized events, and outbox records commit in a single ACID transaction. PostgreSQL NOTIFY is used strictly as an ephemeral wake-up hint; workers poll durable state. |
 | **AD-INGEST-10** | **Pluggable BaseConnector Architecture** | Every external provider implements a standardized interface (`BaseConnector`), isolating provider-specific HTTP quirks from the core ingestion pipeline. |
 | **AD-INGEST-11** | **Four-Layer Permission Model & Resource Scoping** | Ingested resources are not universally readable by workspace members. Access requires passing provider grants, admin allowlists, connector effective access, and Company Brain project authorization. |
-| **AD-INGEST-12** | **Persisted `connector_resources` Entity** | External containers (repos, channels, folders) map authoritatively to Company Brain Projects via a persisted relational entity, establishing deterministic access boundaries. |
+| **AD-INGEST-12** | **Persisted `connector_resources` Entity & N:1 Repository Mapping** | External containers map authoritatively to Company Brain Projects via a persisted relational entity. A project can be associated with multiple repositories ($N:1$), all contributing evidence to the project's knowledge graph. A repository maps to at most one project in V1 (or explicit workspace-global scope). Folder-level monorepo mapping is deferred to Phase 3 due to authorization and provenance boundary enforcement. |
 | **AD-INGEST-13** | **Rejection of Heuristic `project_hint` for Authorization** | Ingested text hints and LLM-proposed project tags are non-authoritative metadata. They must never grant access or set `mapped_project_id`. |
 | **AD-INGEST-14** | **Decoupling Connector Revocation from Data Deletion** | Revoking connector access halts syncing but preserves historical evidence as organizational memory. Data deletion requires explicit retention schedule expiry or legal erasure requests. |
 | **AD-INGEST-15** | **End-to-End Deletion Lifecycle Across All 9 Storage Locations** | Statutory erasure requests propagate through inbox, wire archives, raw evidence, normalized events, quarantined DLQ records, graph nodes, vector embeddings, and caches, while preserving legally mandated audit records. |
 | **AD-INGEST-16** | **Centralized Sovereign Authorization over Fragile ACL Mirroring** | Company Brain does not mirror complex third-party permission trees. It enforces its sovereign ReBAC model via `AuthorizationService`, mapping external resources to internal Projects with explicit administrative redistribution attestation. |
 | **AD-INGEST-17** | **Phased Native PostgreSQL Enforcement for Centralized IAM** | Company Brain avoids the operational overhead of external Zanzibar sidecars (OpenFGA) in V1 by utilizing indexed PostgreSQL CTEs, while adhering strictly to OpenFGA tuple schemas for future scale. |
+| **AD-INGEST-18** | **Material Evidence Authorization & Provenance for Derived Knowledge** | Before returning any derived fact, relationship, summary, or generated answer, the retrieval layer enforces authorization on all underlying evidence that materially supports the content. Citation stripping, endpoint-only filtering, and destination-node-only checks are explicitly rejected as insufficient to prevent information leakage. If supporting evidence spans multiple authorization scopes, the fact requires access to all scopes (all-or-nothing), or must be independently re-derived strictly from authorized evidence. Cross-scope materialized summaries are deferred as a formal architectural prerequisite. |
 
 ---
 
@@ -980,6 +1189,7 @@ The following specific policy decisions and trade-offs are flagged for formal us
 ### 2. Decision Requiring Approval: Disconnect Default Behavior (Context Retained vs. Purge)
 - **Proposal**: When an administrator disconnects a connector or soft-deletes a `connector_resource`, the default behavior retains existing historical evidence in the mapped Project (`Mode A: Disconnect with Context Retained`). The administrator must explicitly select an optional checkbox (`Mode B: Disconnect and Purge Evidence`) to trigger cascading deletion across the nine stores.
 - **Trade-Off**: Preserving historical organizational memory aligns with Company Brain's core purpose, but requires clear UI indication that historical data from disconnected tools remains queryable by project members.
+- **Storage and Retrieval Alignment**: In Mode A, `cr.deleted_at = NOW()` (or `cr.sync_status = 'disconnected'`) halts new ingestion, while `raw_evidence.deleted_at` and `vector_chunks.deleted_at` remain `NULL`. The retrieval engine enforces access using the resource's mapped project scope (`cr.mapped_project_id`), ensuring retained history remains queryable by authorized project members. In Mode B, `ErasureOrchestrator` executes complete deletion across all 9 stores (`raw_evidence.deleted_at = NOW()`, `vector_chunks` purged, graph nodes detached), resulting in immediate denial across all retrieval paths.
 
 ### 3. Open Technical Questions
 1. **Granular Attribute-Level Redaction in Graph Nodes**:
@@ -988,6 +1198,9 @@ The following specific policy decisions and trade-offs are flagged for formal us
 2. **Backfill Depth Limits on Initial Connection**:
    - When connecting an existing GitHub organization with 10 years of history, should initial sync backfill all historical commits or cap at a configurable window (e.g. past 90 days)?
    - *Proposed Baseline*: Default initial sync to the past 90 days with an administrative toggle for full historical backfill.
-3. **Multi-Project Resource Mapping (Monorepo Scoping)**:
+3. **Multi-Project Resource Mapping (Monorepo Scoping & Deferral Rationale)**:
    - Can a single monolithic repository (monorepo) map to multiple Company Brain Projects based on folder path prefixes (e.g. `/services/billing` -> Project Billing, `/services/slam` -> Project SLAM)?
-   - *Proposed Baseline*: For V1, a repository maps to a single Project or workspace-global scope. Monorepo path-based multi-project mapping is deferred to Phase 3.
+   - *Proposed Baseline*: For V1, an entire repository maps to a single Project or explicitly approved workspace-global scope. Folder-level multi-project mapping within a monorepo is deferred to Phase 3 because the core challenge is **authorization and provenance boundary enforcement** (e.g. handling atomic commits spanning multiple folders, preventing context leakage via shared libraries), not ingestion parsing capability.
+4. **Cross-Scope Materialized Summaries & Decomposable Attribution (Prerequisite for Multi-Scope Compilation)**:
+   - *Problem*: How to safely materialize, cache, and serve pre-computed cross-project summaries (e.g. workspace-wide engineering digests, cross-team milestone updates) without leaking unprivileged context or inferences to users with partial project permissions.
+   - *Current Status*: **Unresolved Architectural Prerequisite**. In V1, all materialized summaries are strictly single-scope (bound to a single `project_id` or 100% workspace-global inputs), and cross-scope synthesis is evaluated dynamically at query time using the caller's pre-filtered evidence. A provably safe multi-view materialization, decomposable semantic claim architecture, or formal attribution pipeline is explicitly flagged as a mandatory prerequisite before Phase 2/3 cross-scope knowledge compilation can be built.
