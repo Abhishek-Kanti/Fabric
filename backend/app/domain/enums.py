@@ -92,3 +92,11 @@ class TaskPriority(str, Enum):
     MEDIUM = "medium"
     LOW = "low"
     NONE = "none"
+
+
+class ExternalIdentityStatus(str, Enum):
+    """Operational lifecycle state of an external identity linkage."""
+
+    ACTIVE = "active"
+    SUSPENDED = "suspended"
+

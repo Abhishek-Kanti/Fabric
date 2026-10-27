@@ -14,6 +14,19 @@ from app.domain.enums import (
     UserStatus,
     WorkspaceRole,
 )
+from app.domain.authorization import (
+    Action,
+    AuthorizationDeniedException,
+    AuthorizationDomainException,
+    InvalidIdentityContextException,
+    KnowledgeAction,
+    ProjectAction,
+    ResourceType,
+    TaskAction,
+    TeamAction,
+    WorkspaceAction,
+    WorkspaceMismatchException,
+)
 
 __all__ = [
     "WorkspaceRole",
@@ -25,4 +38,15 @@ __all__ = [
     "InviteStatus",
     "TaskStatus",
     "TaskPriority",
+    "WorkspaceAction",
+    "TeamAction",
+    "ProjectAction",
+    "TaskAction",
+    "KnowledgeAction",
+    "ResourceType",
+    "Action",
+    "AuthorizationDomainException",
+    "AuthorizationDeniedException",
+    "WorkspaceMismatchException",
+    "InvalidIdentityContextException",
 ]

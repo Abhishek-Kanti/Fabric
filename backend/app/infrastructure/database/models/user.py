@@ -21,6 +21,7 @@ from app.domain.enums import UserStatus, WorkspaceRole
 from app.infrastructure.database.base import Base, pg_enum
 
 if TYPE_CHECKING:
+    from app.infrastructure.database.models.external_identity import ExternalIdentityModel
     from app.infrastructure.database.models.workspace import WorkspaceModel
 
 
@@ -42,13 +43,6 @@ class UserModel(Base):
     display_name: Mapped[str] = mapped_column(String(255), nullable=False)
     handle: Mapped[str] = mapped_column(String(100), nullable=False)
     avatar_url: Mapped[str | None] = mapped_column(String(1024), nullable=True)
-    auth_provider: Mapped[str] = mapped_column(
-        String(50),
-        nullable=False,
-        default="local",
-        server_default="local",
-    )
-    auth_provider_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     workspace_role: Mapped[WorkspaceRole] = mapped_column(
         pg_enum(WorkspaceRole, "workspace_role_enum"),
         nullable=False,
@@ -95,6 +89,13 @@ class UserModel(Base):
         "WorkspaceModel",
         back_populates="users",
     )
+    external_identities: Mapped[list["ExternalIdentityModel"]] = relationship(
+        "ExternalIdentityModel",
+        back_populates="user",
+        cascade="all, delete-orphan",
+        foreign_keys="[ExternalIdentityModel.user_id, ExternalIdentityModel.workspace_id]",
+        overlaps="workspace",
+    )
 
     __table_args__ = (
         UniqueConstraint("id", "workspace_id", name="uq_users_id_workspace"),
@@ -113,12 +114,6 @@ class UserModel(Base):
             postgresql_where=text("deleted_at IS NULL"),
         ),
         Index("idx_users_workspace_status", "workspace_id", "status"),
-        Index(
-            "idx_users_auth_lookup",
-            "workspace_id",
-            "auth_provider",
-            "auth_provider_id",
-            postgresql_where=text("deleted_at IS NULL"),
-        ),
         Index("idx_users_workspace_role", "workspace_id", "workspace_role"),
     )
+
